@@ -15,10 +15,10 @@
 package constant
 
 const (
-	CmdFriend                     = "001"
-	CmdBlackList                  = "002"
+	CmdSyncData                   = "001"
+	CmdSyncFlag                   = "002"
 	CmdNotification               = "003"
-	CmdDeleteConversation         = "004"
+	CmdMsgSyncInReinstall         = "004"
 	CmdNewMsgCome                 = "005"
 	CmdSuperGroupMsgCome          = "006"
 	CmdUpdateConversation         = "007"
@@ -131,6 +131,7 @@ const (
 
 	ConversationPrivateChatNotification = 1701
 	ConversationUnreadNotification      = 1702
+	ClearConversationNotification       = 1703
 
 	WorkMomentNotificationBegin = 1900
 	WorkMomentNotification      = 1901
@@ -143,8 +144,8 @@ const (
 
 	HasReadReceiptNotification      = 2150
 	GroupHasReadReceiptNotification = 2155
-	ClearConversationNotification   = 2101
-	DeleteMsgsNotification          = 2102
+
+	DeleteMsgsNotification = 2102
 
 	HasReadReceipt = 2200
 
@@ -296,15 +297,16 @@ const (
 )
 
 const (
-	GetNewestSeq        = 1001
-	PullMsgBySeqList    = 1002
-	SendMsg             = 1003
-	SendSignalMsg       = 1004
-	DelMsg              = 1005
-	PushMsg             = 2001
-	KickOnlineMsg       = 2002
-	LogoutMsg           = 2003
-	SetBackgroundStatus = 2004
+	GetNewestSeq          = 1001
+	PullMsgBySeqList      = 1002
+	SendMsg               = 1003
+	SendSignalMsg         = 1004
+	DelMsg                = 1005
+	PushMsg               = 2001
+	KickOnlineMsg         = 2002
+	LogoutMsg             = 2003
+	SetBackgroundStatus   = 2004
+	WsSubUserOnlineStatus = 2005
 
 	WSDataError = 3001
 )
@@ -384,15 +386,6 @@ const (
 )
 
 const BigVersion = "v3"
-const UpdateVersion = ".0.0"
-const SdkVersion = "openim-sdk-core-"
-const LogFileName = "sdk"
-
-func GetSdkVersion() string {
-	return SdkVersion + BigVersion + UpdateVersion
-}
-
-var HeartbeatInterval = 5
 
 const (
 	MsgSyncModelDefault  = 0   //SyncFlag
@@ -403,6 +396,8 @@ const (
 	MsgSyncProcessing = 1002 //
 	MsgSyncEnd        = 1003 //
 	MsgSyncFailed     = 1004
+	AppDataSyncStart  = 1005
+	AppDataSyncFinish = 1006
 )
 
 const (

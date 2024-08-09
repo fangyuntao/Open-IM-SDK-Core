@@ -17,6 +17,14 @@ package conversation_msg
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/openimsdk/openim-sdk-core/v3/internal/file"
 	"github.com/openimsdk/openim-sdk-core/v3/open_im_sdk_callback"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/common"
@@ -28,19 +36,12 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/server_api_params"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
 	"github.com/openimsdk/openim-sdk-core/v3/sdk_struct"
-	"net/url"
-	"os"
-	"path/filepath"
-	"sort"
-	"strings"
-	"sync"
-	"time"
 
-	"github.com/OpenIMSDK/tools/log"
+	"github.com/openimsdk/tools/log"
 
-	pbConversation "github.com/OpenIMSDK/protocol/conversation"
-	"github.com/OpenIMSDK/protocol/sdkws"
-	"github.com/OpenIMSDK/protocol/wrapperspb"
+	pbConversation "github.com/openimsdk/protocol/conversation"
+	"github.com/openimsdk/protocol/sdkws"
+	"github.com/openimsdk/protocol/wrapperspb"
 
 	"github.com/jinzhu/copier"
 )
@@ -155,6 +156,9 @@ func (c *Conversation) SetConversationDraft(ctx context.Context, conversationID,
 }
 
 func (c *Conversation) setConversationAndSync(ctx context.Context, conversationID string, req *pbConversation.ConversationReq) error {
+	c.conversationSyncMutex.Lock()
+	defer c.conversationSyncMutex.Unlock()
+
 	lc, err := c.db.GetConversation(ctx, conversationID)
 	if err != nil {
 		return err
@@ -164,8 +168,7 @@ func (c *Conversation) setConversationAndSync(ctx context.Context, conversationI
 	if err != nil {
 		return err
 	}
-	c.SyncConversations(ctx, []string{conversationID})
-	return nil
+	return c.IncrSyncConversations(ctx)
 }
 
 func (c *Conversation) ResetConversationGroupAtType(ctx context.Context, conversationID string) error {
@@ -331,6 +334,13 @@ func (c *Conversation) checkID(ctx context.Context, s *sdk_struct.MsgStruct,
 			if gm.Nickname != "" {
 				s.SenderNickname = gm.Nickname
 			}
+		} else { //Maybe the group member information hasn't been pulled locally yet.
+			gm, err := c.group.GetSpecifiedGroupMembersInfo(ctx, groupID, []string{c.loginUserID})
+			if err == nil && gm != nil {
+				if gm[0].Nickname != "" {
+					s.SenderNickname = gm[0].Nickname
+				}
+			}
 		}
 		var attachedInfo sdk_struct.AttachedInfoElem
 		attachedInfo.GroupHasReadInfo.GroupMemberCount = g.MemberCount
@@ -381,6 +391,11 @@ func (c *Conversation) getConversationIDBySessionType(sourceID string, sessionTy
 func (c *Conversation) GetConversationIDBySessionType(_ context.Context, sourceID string, sessionType int) string {
 	return c.getConversationIDBySessionType(sourceID, sessionType)
 }
+
+//this is a test file
+/**
+his is a test file
+*/
 func (c *Conversation) SendMessage(ctx context.Context, s *sdk_struct.MsgStruct, recvID, groupID string, p *sdkws.OfflinePushInfo, isOnlineOnly bool) (*sdk_struct.MsgStruct, error) {
 	filepathExt := func(name ...string) string {
 		for _, path := range name {
@@ -883,7 +898,7 @@ func (c *Conversation) TypingStatusUpdate(ctx context.Context, recvID, msgTip st
 	return c.typingStatusUpdate(ctx, recvID, msgTip)
 }
 
-// funcation (c *Conversation) MarkMessageAsReadByConID(ctx context.Context, conversationID string, msgIDList []string) error {
+// func (c *Conversation) MarkMessageAsReadByConID(ctx context.Context, conversationID string, msgIDList []string) error {
 // 	if len(msgIDList) == 0 {
 // 		_ = c.setOneConversationUnread(ctx, conversationID, 0)
 // 		_ = common.TriggerCmdUpdateConversation(ctx, common.UpdateConNode{ConID: conversationID, Action: constant.UnreadCountSetZero}, c.GetCh())
@@ -895,7 +910,7 @@ func (c *Conversation) TypingStatusUpdate(ctx context.Context, recvID, msgTip st
 // }
 
 // deprecated
-// funcation (c *Conversation) MarkGroupMessageHasRead(ctx context.Context, groupID string) {
+// func (c *Conversation) MarkGroupMessageHasRead(ctx context.Context, groupID string) {
 // 	conversationID := c.getConversationIDBySessionType(groupID, constant.GroupChatType)
 // 	_ = c.setOneConversationUnread(ctx, conversationID, 0)
 // 	_ = common.TriggerCmdUpdateConversation(ctx, common.UpdateConNode{ConID: conversationID, Action: constant.UnreadCountSetZero}, c.GetCh())
@@ -1062,13 +1077,22 @@ func (c *Conversation) initBasicInfo(ctx context.Context, message *sdk_struct.Ms
 	message.IsRead = false
 	message.Status = constant.MsgStatusSending
 	message.SendID = c.loginUserID
-	userInfo, err := c.db.GetLoginUser(ctx, c.loginUserID)
-	if err != nil {
-		return err
-	} else {
-		message.SenderFaceURL = userInfo.FaceURL
-		message.SenderNickname = userInfo.Nickname
+	var (
+		userInfo *sdk_struct.BasicInfo
+		ok       bool
+	)
+	if userInfo, ok = c.user.UserBasicCache.Load(c.loginUserID); !ok {
+		info, err := c.db.GetLoginUser(ctx, c.loginUserID)
+		if err != nil {
+			return err
+		}
+		c.user.UserBasicCache.Store(c.loginUserID, &sdk_struct.BasicInfo{
+			Nickname: info.Nickname,
+			FaceURL:  info.FaceURL,
+		})
 	}
+	message.SenderFaceURL = userInfo.FaceURL
+	message.SenderNickname = userInfo.Nickname
 	ClientMsgID := utils.GetMsgID(message.SendID)
 	message.ClientMsgID = ClientMsgID
 	message.MsgFrom = msgFrom
@@ -1081,7 +1105,7 @@ func (c *Conversation) initBasicInfo(ctx context.Context, message *sdk_struct.Ms
 //// 删除本地和服务器
 //// 删除本地的话不用改服务器的数据
 //// 删除服务器的话，需要把本地的消息状态改成删除
-//funcation (c *Conversation) DeleteConversationFromLocalAndSvr(ctx context.Context, conversationID string) error {
+//func (c *Conversation) DeleteConversationFromLocalAndSvr(ctx context.Context, conversationID string) error {
 //	// Use conversationID to remove conversations and messages from the server first
 //	err := c.clearConversationFromSvr(ctx, conversationID)
 //	if err != nil {
@@ -1126,7 +1150,7 @@ func (c *Conversation) GetMessageListReactionExtensions(ctx context.Context, con
 func (c *Conversation) SearchConversation(ctx context.Context, searchParam string) ([]*server_api_params.Conversation, error) {
 	// Check if search parameter is empty
 	if searchParam == "" {
-		return nil, sdkerrs.ErrArgs.Wrap("search parameter cannot be empty")
+		return nil, sdkerrs.ErrArgs.WrapMsg("search parameter cannot be empty")
 	}
 
 	// Perform the search in your database or data source
@@ -1165,7 +1189,7 @@ func (c *Conversation) SearchConversation(ctx context.Context, searchParam strin
 /**
 **Get some reaction extensions in reactionExtensionKeyList of message list
  */
-//funcation (c *Conversation) GetMessageListSomeReactionExtensions(ctx context.Context, messageList, reactionExtensionKeyList, operationID string) {
+//func (c *Conversation) GetMessageListSomeReactionExtensions(ctx context.Context, messageList, reactionExtensionKeyList, operationID string) {
 //	var messagelist []*sdk_struct.MsgStruct
 //	common.JsonUnmarshalAndArgsValidate(messageList, &messagelist, callback, operationID)
 //	var list []string
@@ -1174,14 +1198,14 @@ func (c *Conversation) SearchConversation(ctx context.Context, searchParam strin
 //	callback.OnSuccess(utils.StructToJsonString(result))
 //	log.NewInfo(operationID, utils.GetSelfFuncName(), "callback: ", utils.StructToJsonString(result))
 //}
-//funcation (c *Conversation) SetTypeKeyInfo(ctx context.Context, message, typeKey, ex string, isCanRepeat bool, operationID string) {
+//func (c *Conversation) SetTypeKeyInfo(ctx context.Context, message, typeKey, ex string, isCanRepeat bool, operationID string) {
 //	s := sdk_struct.MsgStruct{}
 //	common.JsonUnmarshalAndArgsValidate(message, &s, callback, operationID)
 //	result := c.setTypeKeyInfo(callback, &s, typeKey, ex, isCanRepeat, operationID)
 //	callback.OnSuccess(utils.StructToJsonString(result))
 //	log.NewInfo(operationID, utils.GetSelfFuncName(), "callback: ", utils.StructToJsonString(result))
 //}
-//funcation (c *Conversation) GetTypeKeyListInfo(ctx context.Context, message, typeKeyList, operationID string) {
+//func (c *Conversation) GetTypeKeyListInfo(ctx context.Context, message, typeKeyList, operationID string) {
 //	s := sdk_struct.MsgStruct{}
 //	common.JsonUnmarshalAndArgsValidate(message, &s, callback, operationID)
 //	var list []string
@@ -1190,7 +1214,7 @@ func (c *Conversation) SearchConversation(ctx context.Context, searchParam strin
 //	callback.OnSuccess(utils.StructToJsonString(result))
 //	log.NewInfo(operationID, utils.GetSelfFuncName(), "callback: ", utils.StructToJsonString(result))
 //}
-//funcation (c *Conversation) GetAllTypeKeyInfo(ctx context.Context, message, operationID string) {
+//func (c *Conversation) GetAllTypeKeyInfo(ctx context.Context, message, operationID string) {
 //	s := sdk_struct.MsgStruct{}
 //	common.JsonUnmarshalAndArgsValidate(message, &s, callback, operationID)
 //	result := c.getAllTypeKeyInfo(callback, &s, operationID)

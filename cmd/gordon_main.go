@@ -18,11 +18,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/OpenIMSDK/tools/log"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/network"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/server_api_params"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
 	"github.com/openimsdk/openim-sdk-core/v3/test"
+	"github.com/openimsdk/tools/log"
 	"time"
 )
 
@@ -93,7 +93,7 @@ func gRunGetToken(strMyUid string) string {
 	return token
 }
 func main() {
-	uid := "1"
+	uid := "1695766238"
 	//Gordon
 	//uid:="1554321956297519104"
 	//Gordon2
@@ -200,7 +200,7 @@ func main() {
 }
 
 //
-//funcation main() {
+//func main() {
 //	testClientNum := 100
 //	intervalSleep := 2
 //	imIP := "43.128.5.63"
@@ -226,7 +226,7 @@ func main() {
 //
 //}
 
-//funcation printCallerNameAndLine() string {
+//func printCallerNameAndLine() string {
 //	pc, _, line, _ := runtime.Caller(2)
 //	return runtime.FuncForPC(pc).Name() + "()@" + strconv.Itoa(line) + ": "
 //}

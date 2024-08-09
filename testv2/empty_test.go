@@ -15,8 +15,8 @@
 package testv2
 
 import (
-	"github.com/OpenIMSDK/tools/log"
 	"github.com/openimsdk/openim-sdk-core/v3/open_im_sdk"
+	"github.com/openimsdk/tools/log"
 	"testing"
 	"time"
 )
@@ -39,4 +39,22 @@ func Test_Empty(t *testing.T) {
 
 func Test_RunWait(t *testing.T) {
 	time.Sleep(time.Second * 10)
+}
+
+func Test_OnlineState(t *testing.T) {
+	defer func() { select {} }()
+	userIDs := []string{
+		//"3611802798",
+		"2110910952",
+	}
+	for i := 1; ; i++ {
+		time.Sleep(time.Second)
+		//open_im_sdk.UserForSDK.LongConnMgr().UnsubscribeUserOnlinePlatformIDs(ctx, userIDs)
+		res, err := open_im_sdk.UserForSDK.LongConnMgr().GetUserOnlinePlatformIDs(ctx, userIDs)
+		if err != nil {
+			t.Logf("@@@@@@@@@@@@=====> <%d> error %s", i, err)
+			continue
+		}
+		t.Logf("@@@@@@@@@@@@=====> <%d> success %+v", i, res)
+	}
 }

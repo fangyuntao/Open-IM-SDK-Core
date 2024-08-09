@@ -19,6 +19,7 @@ package indexdb
 
 import (
 	"context"
+
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
 	"github.com/openimsdk/openim-sdk-core/v3/wasm/exec"
@@ -201,7 +202,7 @@ func (i *LocalChatLogs) SearchMessageByContentType(ctx context.Context, contentT
 	}
 }
 
-//funcation (i *LocalChatLogs) SuperGroupSearchMessageByContentType(ctx context.Context, contentType []int, sourceID string, startTime, endTime int64, sessionType, offset, count int) (messages []*model_struct.LocalChatLog, err error) {
+//func (i *LocalChatLogs) SuperGroupSearchMessageByContentType(ctx context.Context, contentType []int, sourceID string, startTime, endTime int64, sessionType, offset, count int) (messages []*model_struct.LocalChatLog, err error) {
 //	msgList, err := Exec(utils.StructToJsonString(contentType), sourceID, startTime, endTime, sessionType, offset, count)
 //	if err != nil {
 //		return nil, err
@@ -698,6 +699,21 @@ func (i *LocalChatLogs) GetMessagesBySeqs(ctx context.Context, conversationID st
 
 // GetConversationNormalMsgSeq gets the maximum seq of the session
 func (i *LocalChatLogs) GetConversationNormalMsgSeq(ctx context.Context, conversationID string) (int64, error) {
+	seq, err := exec.Exec(conversationID)
+	if err != nil {
+		return 0, err
+	} else {
+		if v, ok := seq.(float64); ok {
+			var result int64
+			result = int64(v)
+			return result, err
+		} else {
+			return 0, exec.ErrType
+		}
+	}
+}
+
+func (i *LocalChatLogs) CheckConversationNormalMsgSeq(ctx context.Context, conversationID string) (int64, error) {
 	seq, err := exec.Exec(conversationID)
 	if err != nil {
 		return 0, err

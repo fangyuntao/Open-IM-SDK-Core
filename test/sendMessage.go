@@ -15,11 +15,11 @@
 package test
 
 import (
-	"github.com/OpenIMSDK/protocol/sdkws"
-	"github.com/OpenIMSDK/tools/log"
 	"github.com/openimsdk/openim-sdk-core/v3/open_im_sdk"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
+	"github.com/openimsdk/protocol/sdkws"
+	"github.com/openimsdk/tools/log"
 )
 
 func init() {
@@ -28,7 +28,7 @@ func init() {
 
 }
 
-//funcation InitMgr(num int) {
+//func InitMgr(num int) {
 //	log.Warn("", "allLoginMgr cap:  ", num)
 //	allLoginMgr = make(map[int]*CoreNode, num)
 //}
@@ -54,7 +54,7 @@ func addSendFailed() {
 }
 
 //
-//funcation TestSendCostTime() {
+//func TestSendCostTime() {
 //	GenWsConn(0)
 //	sendID := allUserID[0]
 //	recvID := allUserID[0]
@@ -71,7 +71,7 @@ func addSendFailed() {
 //	}
 //
 //}
-//funcation TestSend(idx int, text string, uidNum, intervalSleep int) {
+//func TestSend(idx int, text string, uidNum, intervalSleep int) {
 //	for {
 //		operationID := utils.OperationIDGenerator()
 //		sendID := allUserID[idx]
@@ -87,7 +87,7 @@ func addSendFailed() {
 //}
 //
 
-//funcation sendPressMsg(idx int, text string, uidNum, intervalSleep int) {
+//func sendPressMsg(idx int, text string, uidNum, intervalSleep int) {
 //	for {
 //		operationID := utils.OperationIDGenerator()
 //		sendID := allUserID[idx]

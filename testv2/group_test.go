@@ -15,13 +15,14 @@
 package testv2
 
 import (
-	"github.com/OpenIMSDK/protocol/group"
-	"github.com/OpenIMSDK/protocol/sdkws"
-	"github.com/OpenIMSDK/protocol/wrapperspb"
+	"testing"
+
 	"github.com/openimsdk/openim-sdk-core/v3/open_im_sdk"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdk_params_callback"
-	"testing"
+	"github.com/openimsdk/protocol/group"
+	"github.com/openimsdk/protocol/sdkws"
+	"github.com/openimsdk/protocol/wrapperspb"
 )
 
 func Test_CreateGroupV2(t *testing.T) {
@@ -240,14 +241,6 @@ func Test_InviteUserToGroup(t *testing.T) {
 	t.Log("InviteUserToGroup success", ctx.Value("operationID"))
 }
 
-//func Test_SyncGroup(t *testing.T) {
-//	err := open_im_sdk.UserForSDK.Group().SyncGroupMember(ctx, "3179997540")
-//	if err != nil {
-//		t.Fatal(err)
-//	}
-//	time.Sleep(time.Second * 100000)
-//}
-
 func Test_GetGroup(t *testing.T) {
 	t.Log("--------------------------")
 	infos, err := open_im_sdk.UserForSDK.Group().GetSpecifiedGroupsInfo(ctx, []string{"3179997540"})
@@ -313,4 +306,14 @@ func Test_SetGroupInfo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func Test_GetJoinedGroupListPage(t *testing.T) {
+	t.Log("-----------------------")
+	info, err := open_im_sdk.UserForSDK.Group().GetJoinedGroupListPage(ctx, 0, 10)
+	t.Log("-----------------------")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Log(info)
 }

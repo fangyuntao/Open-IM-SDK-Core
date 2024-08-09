@@ -19,13 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/openimsdk/openim-sdk-core/v3/open_im_sdk_callback"
-	"github.com/openimsdk/openim-sdk-core/v3/pkg/ccontext"
-	"github.com/openimsdk/openim-sdk-core/v3/pkg/common"
-	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
-	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
-	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
-	"github.com/openimsdk/openim-sdk-core/v3/sdk_struct"
 	"io"
 	"runtime"
 	"strconv"
@@ -33,11 +26,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/OpenIMSDK/protocol/sdkws"
-	"github.com/OpenIMSDK/tools/errs"
-	"github.com/OpenIMSDK/tools/log"
+	"github.com/openimsdk/openim-sdk-core/v3/open_im_sdk_callback"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/ccontext"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/common"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
+	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
+	"github.com/openimsdk/openim-sdk-core/v3/sdk_struct"
+
 	"github.com/golang/protobuf/proto"
 	"github.com/gorilla/websocket"
+
+	"github.com/openimsdk/protocol/sdkws"
+	"github.com/openimsdk/tools/errs"
+	"github.com/openimsdk/tools/log"
 )
 
 const (
@@ -48,7 +50,7 @@ const (
 	pongWait = 30 * time.Second
 
 	// Send pings to peer with this period. Must be less than pongWait.
-	pingPeriod = (pongWait * 9) / 10
+	pingPeriod = (pongWait * 8) / 10
 
 	// Maximum message size allowed from peer.
 	maxMessageSize = 1024 * 1024
@@ -65,11 +67,6 @@ const (
 )
 
 var (
-	newline = []byte{'\n'}
-	space   = []byte{' '}
-)
-
-var (
 	ErrChanClosed                = errors.New("send channel closed")
 	ErrConnClosed                = errors.New("conn has closed")
 	ErrNotSupportMessageProtocol = errors.New("not support message protocol")
@@ -82,8 +79,9 @@ type LongConnMgr struct {
 	w          sync.Mutex
 	connStatus int
 	// The long connection,can be set tcp or websocket.
-	conn     LongConn
-	listener open_im_sdk_callback.OnConnListener
+	conn       LongConn
+	listener   open_im_sdk_callback.OnConnListener
+	userOnline func(map[string][]int32)
 	// Buffered channel of outbound messages.
 	send               chan Message
 	pushMsgAndMaxSeqCh chan common.Cmd2Value
@@ -102,6 +100,8 @@ type LongConnMgr struct {
 	IsBackground bool
 	// write conn lock
 	connWrite *sync.Mutex
+
+	sub *subscription
 }
 
 type Message struct {
@@ -109,11 +109,19 @@ type Message struct {
 	Resp    chan *GeneralWsResp
 }
 
-func NewLongConnMgr(ctx context.Context, listener open_im_sdk_callback.OnConnListener, heartbeatCmdCh, pushMsgAndMaxSeqCh, loginMgrCh chan common.Cmd2Value) *LongConnMgr {
-	l := &LongConnMgr{listener: listener, pushMsgAndMaxSeqCh: pushMsgAndMaxSeqCh,
-		loginMgrCh: loginMgrCh, IsCompression: true,
-		Syncer: NewWsRespAsyn(), encoder: NewGobEncoder(), compressor: NewGzipCompressor(),
-		reconnectStrategy: NewExponentialRetry()}
+func NewLongConnMgr(ctx context.Context, listener open_im_sdk_callback.OnConnListener, userOnline func(map[string][]int32), heartbeatCmdCh, pushMsgAndMaxSeqCh, loginMgrCh chan common.Cmd2Value) *LongConnMgr {
+	l := &LongConnMgr{
+		listener:           listener,
+		userOnline:         userOnline,
+		pushMsgAndMaxSeqCh: pushMsgAndMaxSeqCh,
+		loginMgrCh:         loginMgrCh,
+		IsCompression:      true,
+		Syncer:             NewWsRespAsyn(),
+		encoder:            NewGobEncoder(),
+		compressor:         NewGzipCompressor(),
+		reconnectStrategy:  NewExponentialRetry(),
+		sub:                newSubscription(),
+	}
 	l.send = make(chan Message, 10)
 	l.conn = NewWebSocket(WebSocket)
 	l.connWrite = new(sync.Mutex)
@@ -122,7 +130,6 @@ func NewLongConnMgr(ctx context.Context, listener open_im_sdk_callback.OnConnLis
 	return l
 }
 func (c *LongConnMgr) Run(ctx context.Context) {
-	//fmt.Println(mcontext.GetOperationID(ctx), "login run", string(debug.Stack()))
 	go c.readPump(ctx)
 	go c.writePump(ctx)
 	go c.heartbeat(ctx)
@@ -174,8 +181,14 @@ func (c *LongConnMgr) readPump(ctx context.Context) {
 		log.ZWarn(c.ctx, "readPump closed", c.closedErr)
 	}()
 	connNum := 0
-	//c.conn.SetPongHandler(function(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 	for {
+		select {
+		case <-ctx.Done():
+			c.closedErr = ctx.Err()
+			log.ZInfo(c.ctx, "readPump done, sdk logout.....")
+			return
+		default:
+		}
 		ctx = ccontext.WithOperationID(ctx, utils.OperationIDGenerator())
 		needRecon, err := c.reConn(ctx, &connNum)
 		if !needRecon {
@@ -191,13 +204,9 @@ func (c *LongConnMgr) readPump(ctx context.Context) {
 		_ = c.conn.SetReadDeadline(pongWait)
 		messageType, message, err := c.conn.ReadMessage()
 		if err != nil {
-			//if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-			//	log.Printf("error: %v", err)
-			//}
-			//break
-			//c.closedErr = err
 			log.ZError(c.ctx, "readMessage err", err, "goroutine ID:", getGoroutineID())
 			_ = c.close()
+			c.sub.onConnClosed(err)
 			continue
 		}
 		switch messageType {
@@ -210,15 +219,11 @@ func (c *LongConnMgr) readPump(ctx context.Context) {
 		case MessageText:
 			c.closedErr = ErrNotSupportMessageProtocol
 			return
-		//case PingMessage:
-		//	err := c.writePongMsg()
-		//	log.ZError(c.ctx, "writePongMsg", err)
 		case CloseMessage:
 			c.closedErr = ErrClientClosed
 			return
 		default:
 		}
-
 	}
 }
 
@@ -238,6 +243,7 @@ func (c *LongConnMgr) writePump(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			c.closedErr = ctx.Err()
+			log.ZInfo(c.ctx, "writePump done, sdk logout.....")
 			return
 		case message, ok := <-c.send:
 			if !ok {
@@ -288,24 +294,44 @@ func (c *LongConnMgr) heartbeat(ctx context.Context) {
 			log.ZInfo(ctx, "heartbeat done sdk logout.....")
 			return
 		case <-c.heartbeatCh:
-			c.sendPingToServer(ctx)
+			c.retrieveMaxSeq(ctx)
 		case <-ticker.C:
-			c.sendPingToServer(ctx)
+			log.ZInfo(ctx, "sendPingMessage", "goroutine ID:", getGoroutineID())
+			c.sendPingMessage(ctx)
 		}
 	}
 
 }
+
+func (c *LongConnMgr) sendPingMessage(ctx context.Context) {
+	c.connWrite.Lock()
+	defer c.connWrite.Unlock()
+	opid := utils.OperationIDGenerator()
+	log.ZDebug(ctx, "ping Message Started", "goroutine ID:", getGoroutineID(), "opid", opid)
+	if c.IsConnected() {
+		log.ZDebug(ctx, "ping Message Started isConnected", "goroutine ID:", getGoroutineID(), "opid", opid)
+		c.conn.SetWriteDeadline(writeWait)
+		if err := c.conn.WriteMessage(PingMessage, []byte(opid)); err != nil {
+			log.ZWarn(ctx, "ping Message failed", err, "goroutine ID:", getGoroutineID(), "opid", opid)
+			return
+		}
+	} else {
+		log.ZDebug(ctx, "ping Message failed, connection", "connStatus", c.GetConnectionStatus(), "goroutine ID:", getGoroutineID(), "opid", opid)
+	}
+}
+
 func getGoroutineID() int64 {
 	buf := make([]byte, 64)
 	buf = buf[:runtime.Stack(buf, false)]
 	idField := strings.Fields(strings.TrimPrefix(string(buf), "goroutine "))[0]
 	id, err := strconv.ParseInt(idField, 10, 64)
 	if err != nil {
-		panic(fmt.Sprintf("cannot get goroutine id: %v", err))
+		return 0
 	}
 	return id
 }
-func (c *LongConnMgr) sendPingToServer(ctx context.Context) {
+
+func (c *LongConnMgr) retrieveMaxSeq(ctx context.Context) {
 	if c.conn == nil {
 		return
 	}
@@ -313,7 +339,7 @@ func (c *LongConnMgr) sendPingToServer(ctx context.Context) {
 	m.UserID = ccontext.Info(ctx).UserID()
 	opID := utils.OperationIDGenerator()
 	sCtx := ccontext.WithOperationID(c.ctx, opID)
-	log.ZInfo(sCtx, "ping and getMaxSeq start", "goroutine ID:", getGoroutineID())
+	log.ZInfo(sCtx, "retrieveMaxSeq start", "goroutine ID:", getGoroutineID())
 	data, err := proto.Marshal(&m)
 	if err != nil {
 		log.ZError(sCtx, "proto.Marshal", err)
@@ -333,7 +359,7 @@ func (c *LongConnMgr) sendPingToServer(ctx context.Context) {
 		return
 	} else {
 		if resp.ErrCode != 0 {
-			log.ZError(sCtx, "getMaxSeq failed", nil, "errCode:", resp.ErrCode, "errMsg:", resp.ErrMsg)
+			log.ZError(sCtx, "retrieveMaxSeq failed", nil, "errCode:", resp.ErrCode, "errMsg:", resp.ErrMsg)
 		}
 		var wsSeqResp sdkws.GetMaxSeqResp
 		err = proto.Unmarshal(resp.Data, &wsSeqResp)
@@ -349,6 +375,7 @@ func (c *LongConnMgr) sendPingToServer(ctx context.Context) {
 		}
 	}
 }
+
 func (c *LongConnMgr) sendAndWaitResp(msg *GeneralWsReq) (*GeneralWsResp, error) {
 	tempChan, err := c.writeBinaryMsgAndRetry(msg)
 	defer c.Syncer.DelCh(msg.MsgIncr)
@@ -358,7 +385,7 @@ func (c *LongConnMgr) sendAndWaitResp(msg *GeneralWsReq) (*GeneralWsResp, error)
 		select {
 		case resp := <-tempChan:
 			return resp, nil
-		case <-time.After(time.Second * 5):
+		case <-time.After(time.Second * 10):
 			return nil, sdkerrs.ErrNetworkTimeOut
 		}
 
@@ -369,7 +396,7 @@ func (c *LongConnMgr) writeBinaryMsgAndRetry(msg *GeneralWsReq) (chan *GeneralWs
 	msgIncr, tempChan := c.Syncer.AddCh(msg.SendID)
 	msg.MsgIncr = msgIncr
 	if c.GetConnectionStatus() != Connected && msg.ReqIdentifier == constant.GetNewestSeq {
-		return tempChan, sdkerrs.ErrNetwork.Wrap("connection closed,conning...")
+		return tempChan, sdkerrs.ErrNetwork.WrapMsg("connection closed,conning...")
 	}
 	for i := 0; i < maxReconnectAttempts; i++ {
 		err := c.writeBinaryMsg(*msg)
@@ -383,22 +410,63 @@ func (c *LongConnMgr) writeBinaryMsgAndRetry(msg *GeneralWsReq) (chan *GeneralWs
 			return tempChan, nil
 		}
 	}
-	return nil, sdkerrs.ErrNetwork.Wrap("send binary message error")
+	return nil, sdkerrs.ErrNetwork.WrapMsg("send binary message error")
+}
+
+func (c *LongConnMgr) writeBinaryMsgAndNotRetry(msg *GeneralWsReq) (chan *GeneralWsResp, error) {
+	msgIncr, tempChan := c.Syncer.AddCh(msg.SendID)
+	msg.MsgIncr = msgIncr
+	if err := c.writeBinaryMsg(*msg); err != nil {
+		c.Syncer.DelCh(msgIncr)
+		return nil, err
+	}
+	return tempChan, nil
 }
 
 func (c *LongConnMgr) writeBinaryMsg(req GeneralWsReq) error {
 	c.connWrite.Lock()
 	defer c.connWrite.Unlock()
+	return c.writeBinaryMsgNoLock(req)
+}
+
+func (c *LongConnMgr) writeSubInfo(subscribeUserID, unsubscribeUserID []string, lock bool) error {
+	opID := utils.OperationIDGenerator()
+	sCtx := ccontext.WithOperationID(c.ctx, opID)
+	log.ZInfo(sCtx, "writeSubInfo start", "goroutine ID:", getGoroutineID())
+	subReq := sdkws.SubUserOnlineStatus{
+		SubscribeUserID:   subscribeUserID,
+		UnsubscribeUserID: unsubscribeUserID,
+	}
+	data, err := proto.Marshal(&subReq)
+	if err != nil {
+		log.ZError(sCtx, "proto.Marshal", err)
+		return err
+	}
+	req := GeneralWsReq{
+		ReqIdentifier: constant.WsSubUserOnlineStatus,
+		SendID:        ccontext.Info(sCtx).UserID(),
+		OperationID:   opID,
+		MsgIncr:       utils.OperationIDGenerator(),
+		Data:          data,
+	}
+	if lock {
+		return c.writeBinaryMsg(req)
+	} else {
+		return c.writeBinaryMsgNoLock(req)
+	}
+}
+
+func (c *LongConnMgr) writeBinaryMsgNoLock(req GeneralWsReq) error {
 	encodeBuf, err := c.encoder.Encode(req)
 	if err != nil {
 		return err
 	}
 	if c.GetConnectionStatus() != Connected {
-		return sdkerrs.ErrNetwork.Wrap("connection closed,re conning...")
+		return sdkerrs.ErrNetwork.WrapMsg("connection closed,re conning...")
 	}
 	_ = c.conn.SetWriteDeadline(writeWait)
 	if c.IsCompression {
-		resultBuf, compressErr := c.compressor.Compress(encodeBuf)
+		resultBuf, compressErr := c.compressor.CompressWithPool(encodeBuf)
 		if compressErr != nil {
 			return compressErr
 		}
@@ -407,6 +475,7 @@ func (c *LongConnMgr) writeBinaryMsg(req GeneralWsReq) error {
 		return c.conn.WriteMessage(MessageBinary, encodeBuf)
 	}
 }
+
 func (c *LongConnMgr) close() error {
 	c.w.Lock()
 	defer c.w.Unlock()
@@ -421,7 +490,7 @@ func (c *LongConnMgr) close() error {
 func (c *LongConnMgr) handleMessage(message []byte) error {
 	if c.IsCompression {
 		var decompressErr error
-		message, decompressErr = c.compressor.DeCompress(message)
+		message, decompressErr = c.compressor.DecompressWithPool(message)
 		if decompressErr != nil {
 			log.ZError(c.ctx, "DeCompress failed", decompressErr, message)
 			return sdkerrs.ErrMsgDeCompression
@@ -447,10 +516,11 @@ func (c *LongConnMgr) handleMessage(message []byte) error {
 		}
 		return sdkerrs.ErrLoginOut
 	case constant.KickOnlineMsg:
-		log.ZDebug(ctx, "client kicked offline")
-		c.listener.OnKickedOffline()
-		_ = common.TriggerCmdLogOut(ctx, c.loginMgrCh)
-		return errors.New("client kicked offline")
+		log.ZDebug(ctx, "socket receive client kicked offline")
+
+		err = errs.ErrTokenKicked.WrapMsg("socket receive client kicked offline")
+		ccontext.GetApiErrCodeCallback(ctx).OnError(ctx, err)
+		return err
 	case constant.GetNewestSeq:
 		fallthrough
 	case constant.PullMsgBySeqList:
@@ -464,12 +534,95 @@ func (c *LongConnMgr) handleMessage(message []byte) error {
 			log.ZError(ctx, "notifyResp failed", err, "reqIdentifier", wsResp.ReqIdentifier, "errCode",
 				wsResp.ErrCode, "errMsg", wsResp.ErrMsg, "msgIncr", wsResp.MsgIncr, "operationID", wsResp.OperationID)
 		}
+	case constant.WsSubUserOnlineStatus:
+		if err := c.handlerUserOnlineChange(ctx, wsResp); err != nil {
+			log.ZError(ctx, "handlerUserOnlineChange failed", err, "wsResp", wsResp)
+		}
 	default:
 		// log.Error(wsResp.OperationID, "type failed, ", wsResp.ReqIdentifier)
 		return sdkerrs.ErrMsgBinaryTypeNotSupport
 	}
 	return nil
 }
+
+func (c *LongConnMgr) handlerUserOnlineChange(ctx context.Context, wsResp GeneralWsResp) error {
+	if wsResp.ErrCode != 0 {
+		return errs.New("handlerUserOnlineChange failed")
+	}
+	var tips sdkws.SubUserOnlineStatusTips
+	if err := proto.Unmarshal(wsResp.Data, &tips); err != nil {
+		return err
+	}
+	log.ZDebug(ctx, "handlerUserOnlineChange", "tips", &tips)
+	c.callbackUserOnlineChange(c.sub.setUserState(tips.Subscribers))
+	return nil
+}
+
+func (c *LongConnMgr) GetUserOnlinePlatformIDs(ctx context.Context, userIDs []string) (map[string][]int32, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+	defer cancel()
+	exist, wait, subUserIDs, unsubUserIDs := c.sub.getUserOnline(userIDs)
+	if len(subUserIDs)+len(unsubUserIDs) > 0 {
+		if err := c.writeSubInfo(subUserIDs, unsubUserIDs, true); err != nil {
+			c.sub.writeFailed(wait, err)
+			return nil, err
+		}
+	}
+	for userID, statues := range wait {
+		select {
+		case <-ctx.Done():
+			return nil, context.Cause(ctx)
+		case <-statues.Done():
+			online, err := statues.Result()
+			if err != nil {
+				return nil, err
+			}
+			exist[userID] = online
+		}
+	}
+	return exist, nil
+}
+
+func (c *LongConnMgr) UnsubscribeUserOnlinePlatformIDs(ctx context.Context, userIDs []string) error {
+	if len(userIDs) > 0 {
+		c.sub.unsubscribe(userIDs)
+	}
+	return nil
+}
+
+func (c *LongConnMgr) writeConnFirstSubMsg(ctx context.Context) error {
+	userIDs := c.sub.getNewConnSubUserIDs()
+	log.ZDebug(ctx, "writeConnFirstSubMsg getNewConnSubUserIDs", "userIDs", userIDs)
+	if len(userIDs) == 0 {
+		return nil
+	}
+	if err := c.writeSubInfo(userIDs, nil, false); err != nil {
+		c.sub.onConnClosed(err)
+		return err
+	}
+	return nil
+}
+
+func (c *LongConnMgr) callbackUserOnlineChange(users map[string][]int32) {
+	log.ZDebug(c.ctx, "#### ===> callbackUserOnlineChange", "users", users)
+	if len(users) == 0 {
+		return
+	}
+	c.userOnline(users)
+	//for userID, onlinePlatformIDs := range users {
+	//	status := userPb.OnlineStatus{
+	//		UserID:      userID,
+	//		PlatformIDs: onlinePlatformIDs,
+	//	}
+	//	if len(status.PlatformIDs) == 0 {
+	//		status.Status = constant.Offline
+	//	} else {
+	//		status.Status = constant.Online
+	//	}
+	//	c.userOnline.OnUserStatusChanged(utils.StructToJsonString(users))
+	//}
+}
+
 func (c *LongConnMgr) IsConnected() bool {
 	c.w.Lock()
 	defer c.w.Unlock()
@@ -490,13 +643,13 @@ func (c *LongConnMgr) SetConnectionStatus(status int) {
 	defer c.w.Unlock()
 	c.connStatus = status
 }
+
 func (c *LongConnMgr) reConn(ctx context.Context, num *int) (needRecon bool, err error) {
 	if c.IsConnected() {
 		return true, nil
 	}
 	c.connWrite.Lock()
 	defer c.connWrite.Unlock()
-	log.ZDebug(ctx, "conn start")
 	c.listener.OnConnecting()
 	c.SetConnectionStatus(Connecting)
 	url := fmt.Sprintf("%s?sendID=%s&token=%s&platformID=%d&operationID=%s&isBackground=%t",
@@ -505,6 +658,7 @@ func (c *LongConnMgr) reConn(ctx context.Context, num *int) (needRecon bool, err
 	if c.IsCompression {
 		url += fmt.Sprintf("&compression=%s", "gzip")
 	}
+	log.ZDebug(ctx, "conn start", "url", url)
 	resp, err := c.conn.Dial(url, nil)
 	if err != nil {
 		c.SetConnectionStatus(Closed)
@@ -541,10 +695,20 @@ func (c *LongConnMgr) reConn(ctx context.Context, num *int) (needRecon bool, err
 		c.listener.OnConnectFailed(sdkerrs.NetworkError, err.Error())
 		return true, err
 	}
+	if err := c.writeConnFirstSubMsg(ctx); err != nil {
+		log.ZError(ctx, "first write user online sub info error", err)
+		ccontext.GetApiErrCodeCallback(ctx).OnError(ctx, err)
+		c.listener.OnConnectFailed(sdkerrs.NetworkError, err.Error())
+		c.conn.Close()
+		return true, err
+	}
 	c.listener.OnConnectSuccess()
+	c.sub.onConnSuccess()
 	c.ctx = newContext(c.conn.LocalAddr())
 	c.ctx = context.WithValue(ctx, "ConnContext", c.ctx)
 	c.SetConnectionStatus(Connected)
+	c.conn.SetPongHandler(c.pongHandler)
+	c.conn.SetPingHandler(c.pingHandler)
 	*num++
 	log.ZInfo(c.ctx, "long conn establish success", "localAddr", c.conn.LocalAddr(), "connNum", *num)
 	c.reconnectStrategy.Reset()
@@ -579,4 +743,34 @@ func (c *LongConnMgr) SetBackground(isBackground bool) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.IsBackground = isBackground
+}
+
+// receive ping and send pong.
+func (c *LongConnMgr) pingHandler(_ string) error {
+	if err := c.conn.SetReadDeadline(pongWait); err != nil {
+		return err
+	}
+
+	return c.writePongMsg()
+}
+
+// when client send pong.
+func (c *LongConnMgr) pongHandler(appData string) error {
+	log.ZDebug(c.ctx, "server Pong Message Received", "appData", appData)
+	if err := c.conn.SetReadDeadline(pongWait); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *LongConnMgr) writePongMsg() error {
+	c.connWrite.Lock()
+	defer c.connWrite.Unlock()
+
+	err := c.conn.SetWriteDeadline(writeWait)
+	if err != nil {
+		return err
+	}
+
+	return c.conn.WriteMessage(PongMessage, nil)
 }

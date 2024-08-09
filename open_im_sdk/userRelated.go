@@ -17,11 +17,12 @@ package open_im_sdk
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"github.com/OpenIMSDK/protocol/push"
-	"github.com/OpenIMSDK/protocol/sdkws"
-	"github.com/OpenIMSDK/tools/log"
+	"strings"
+	"sync"
+	"time"
+	"unsafe"
+
 	"github.com/openimsdk/openim-sdk-core/v3/internal/business"
 	conv "github.com/openimsdk/openim-sdk-core/v3/internal/conversation_msg"
 	"github.com/openimsdk/openim-sdk-core/v3/internal/file"
@@ -39,12 +40,12 @@ import (
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/db_interface"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
-	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
 	"github.com/openimsdk/openim-sdk-core/v3/sdk_struct"
-	"strings"
-	"sync"
-	"time"
-	"unsafe"
+	"github.com/openimsdk/protocol/push"
+	"github.com/openimsdk/protocol/sdkws"
+	"github.com/openimsdk/tools/errs"
+	"github.com/openimsdk/tools/log"
+	"github.com/openimsdk/tools/utils/jsonutil"
 )
 
 const (
@@ -65,7 +66,7 @@ var (
 // CheckResourceLoad checks the SDK is resource load status.
 func CheckResourceLoad(uSDK *LoginMgr, funcName string) error {
 	if uSDK == nil {
-		return utils.Wrap(errors.New("CheckResourceLoad failed uSDK == nil "), "")
+		return errs.New("SDK not initialized,userForSDK is nil", "funcName", funcName).Wrap()
 	}
 	if funcName == "" {
 		return nil
@@ -74,9 +75,8 @@ func CheckResourceLoad(uSDK *LoginMgr, funcName string) error {
 	if parts[len(parts)-1] == "Login-fm" {
 		return nil
 	}
-	if uSDK.Friend() == nil || uSDK.User() == nil || uSDK.Group() == nil || uSDK.Conversation() == nil ||
-		uSDK.Full() == nil {
-		return utils.Wrap(errors.New("CheckResourceLoad failed, resource nil "), "")
+	if uSDK.getLoginStatus(context.Background()) != Logged {
+		return errs.New("SDK not logged in", "funcName", funcName).Wrap()
 	}
 	return nil
 }
@@ -315,27 +315,22 @@ func (u *LoginMgr) handlerSendingMsg(ctx context.Context, sendingMsg *model_stru
 	}
 	if latestMsg.ClientMsgID == sendingMsg.ClientMsgID {
 		latestMsg.Status = constant.MsgStatusSendFailed
-		conversation.LatestMsg = utils.StructToJsonString(latestMsg)
+		conversation.LatestMsg = jsonutil.StructToJsonString(latestMsg)
 		return u.db.UpdateConversation(ctx, conversation)
 	}
 	return nil
 }
 
-func (u *LoginMgr) login(ctx context.Context, userID, token string) error {
-	if u.getLoginStatus(ctx) == Logged {
-		return sdkerrs.ErrLoginRepeat
-	}
-	u.setLoginStatus(Logging)
+func (u *LoginMgr) initMgr(ctx context.Context, userID, token string) error {
 	u.info.UserID = userID
 	u.info.Token = token
-	log.ZDebug(ctx, "login start... ", "userID", userID, "token", token)
 	t1 := time.Now()
 	u.token = token
 	u.loginUserID = userID
 	var err error
 	u.db, err = db.NewDataBase(ctx, userID, u.info.DataDir, int(u.info.LogLevel))
 	if err != nil {
-		return sdkerrs.ErrSdkInternal.Wrap("init database " + err.Error())
+		return sdkerrs.ErrSdkInternal.WrapMsg("init database " + err.Error())
 	}
 	u.checkSendingMessage(ctx)
 	log.ZDebug(ctx, "NewDataBase ok", "userID", userID, "dataDir", u.info.DataDir, "login cost time", time.Since(t1))
@@ -346,16 +341,41 @@ func (u *LoginMgr) login(ctx context.Context, userID, token string) error {
 	u.group = group.NewGroup(u.loginUserID, u.db, u.conversationCh)
 	u.full = full.NewFull(u.user, u.friend, u.group, u.conversationCh, u.db)
 	u.business = business.NewBusiness(u.db)
-	u.third = third.NewThird(u.info.PlatformID, u.loginUserID, constant.SdkVersion, u.info.SystemType, u.info.LogFilePath, u.file)
+	u.third = third.NewThird(u.info.PlatformID, u.loginUserID, u.info.SystemType, u.info.LogFilePath, u.file)
 	log.ZDebug(ctx, "forcedSynchronization success...", "login cost time: ", time.Since(t1))
 
 	u.msgSyncer, _ = interaction.NewMsgSyncer(ctx, u.conversationCh, u.pushMsgAndMaxSeqCh, u.loginUserID, u.longConnMgr, u.db, 0)
 	u.conversation = conv.NewConversation(ctx, u.longConnMgr, u.db, u.conversationCh,
 		u.friend, u.group, u.user, u.business, u.full, u.file)
 	u.setListener(ctx)
+	return nil
+}
+
+func (u *LoginMgr) login(ctx context.Context, userID, token string) error {
+	if u.getLoginStatus(ctx) == Logged {
+		return sdkerrs.ErrLoginRepeat
+	}
+	u.setLoginStatus(Logging)
+	log.ZDebug(ctx, "login start... ", "userID", userID, "token", token)
+	t1 := time.Now()
+
+	if err := u.initMgr(ctx, userID, token); err != nil {
+		return err
+	}
+
 	u.run(ctx)
 	u.setLoginStatus(Logged)
 	log.ZDebug(ctx, "login success...", "login cost time: ", time.Since(t1))
+	return nil
+}
+
+func (u *LoginMgr) loginWithOutInit(ctx context.Context, userID, token string) error {
+	if u.getLoginStatus(ctx) == Logged {
+		return sdkerrs.ErrLoginRepeat
+	}
+	u.setLoginStatus(Logging)
+	u.run(ctx)
+	u.setLoginStatus(Logged)
 	return nil
 }
 
@@ -380,7 +400,6 @@ func (u *LoginMgr) run(ctx context.Context) {
 	u.longConnMgr.Run(ctx)
 	go u.msgSyncer.DoListener(ctx)
 	go common.DoListener(u.conversation, u.ctx)
-	go u.group.DeleteGroupAndMemberInfo(ctx)
 	go u.logoutListener(ctx)
 }
 
@@ -406,9 +425,13 @@ func (u *LoginMgr) initResources() {
 	u.heartbeatCmdCh = make(chan common.Cmd2Value, 10)
 	u.pushMsgAndMaxSeqCh = make(chan common.Cmd2Value, 1000)
 	u.loginMgrCh = make(chan common.Cmd2Value, 1)
-	u.longConnMgr = interaction.NewLongConnMgr(u.ctx, u.connListener, u.heartbeatCmdCh, u.pushMsgAndMaxSeqCh, u.loginMgrCh)
+	u.longConnMgr = interaction.NewLongConnMgr(u.ctx, u.connListener, u.userOnlineStatusChange, u.heartbeatCmdCh, u.pushMsgAndMaxSeqCh, u.loginMgrCh)
 	u.ctx = ccontext.WithApiErrCode(u.ctx, &apiErrCallback{loginMgrCh: u.loginMgrCh, listener: u.connListener})
 	u.setLoginStatus(LogoutStatus)
+}
+
+func (u *LoginMgr) userOnlineStatusChange(users map[string][]int32) {
+	u.User().UserOnlineStatusChange(users)
 }
 
 func (u *LoginMgr) UnInitSDK() {
@@ -442,12 +465,13 @@ func (u *LoginMgr) logout(ctx context.Context, isTokenValid bool) error {
 	}
 	// user object must be rest  when user logout
 	u.initResources()
-	log.ZDebug(ctx, "TriggerCmdLogout client success...", "isTokenValid", isTokenValid)
+	log.ZDebug(ctx, "TriggerCmdLogout client success...",
+		"isTokenValid", isTokenValid)
 	return nil
 }
 
 func (u *LoginMgr) setAppBackgroundStatus(ctx context.Context, isBackground bool) error {
-	if u.longConnMgr.GetConnectionStatus() == 0 {
+	if u.longConnMgr.GetConnectionStatus() == interaction.DefaultNotConnect {
 		u.longConnMgr.SetBackground(isBackground)
 		return nil
 	}
@@ -457,9 +481,15 @@ func (u *LoginMgr) setAppBackgroundStatus(ctx context.Context, isBackground bool
 		return err
 	} else {
 		u.longConnMgr.SetBackground(isBackground)
-		if isBackground == false {
+		if !isBackground {
 			_ = common.TriggerCmdWakeUp(u.heartbeatCmdCh)
+			_ = common.TriggerCmdSyncData(ctx, u.conversationCh)
 		}
+
 		return nil
 	}
+}
+
+func (u *LoginMgr) LongConnMgr() *interaction.LongConnMgr {
+	return u.longConnMgr
 }

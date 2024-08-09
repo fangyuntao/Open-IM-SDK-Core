@@ -17,39 +17,37 @@ package user
 import (
 	"context"
 	"fmt"
-	authPb "github.com/OpenIMSDK/protocol/auth"
-	"github.com/OpenIMSDK/protocol/sdkws"
-	userPb "github.com/OpenIMSDK/protocol/user"
-	"github.com/OpenIMSDK/tools/log"
 	"github.com/openimsdk/openim-sdk-core/v3/internal/cache"
 	"github.com/openimsdk/openim-sdk-core/v3/internal/util"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/db_interface"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/db/model_struct"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/sdkerrs"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/syncer"
+	"github.com/openimsdk/openim-sdk-core/v3/sdk_struct"
+	authPb "github.com/openimsdk/protocol/auth"
+	"github.com/openimsdk/protocol/sdkws"
+	userPb "github.com/openimsdk/protocol/user"
+	"github.com/openimsdk/tools/log"
+	"github.com/openimsdk/tools/utils/datautil"
 
-	PbConstant "github.com/OpenIMSDK/protocol/constant"
 	"github.com/openimsdk/openim-sdk-core/v3/open_im_sdk_callback"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/common"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/constant"
 	"github.com/openimsdk/openim-sdk-core/v3/pkg/utils"
+	PbConstant "github.com/openimsdk/protocol/constant"
 )
-
-type BasicInfo struct {
-	Nickname string
-	FaceURL  string
-}
 
 // User is a struct that represents a user in the system.
 type User struct {
 	db_interface.DataBase
-	loginUserID       string
-	listener          func() open_im_sdk_callback.OnUserListener
-	userSyncer        *syncer.Syncer[*model_struct.LocalUser, string]
-	commandSyncer     *syncer.Syncer[*model_struct.LocalUserCommand, string]
-	conversationCh    chan common.Cmd2Value
-	UserBasicCache    *cache.Cache[string, *BasicInfo]
-	OnlineStatusCache *cache.Cache[string, *userPb.OnlineStatus]
+	loginUserID    string
+	listener       func() open_im_sdk_callback.OnUserListener
+	userSyncer     *syncer.Syncer[*model_struct.LocalUser, syncer.NoResp, string]
+	commandSyncer  *syncer.Syncer[*model_struct.LocalUserCommand, syncer.NoResp, string]
+	conversationCh chan common.Cmd2Value
+	UserBasicCache *cache.Cache[string, *sdk_struct.BasicInfo]
+
+	//OnlineStatusCache *cache.Cache[string, *userPb.OnlineStatus]
 }
 
 // SetListener sets the user's listener.
@@ -57,17 +55,32 @@ func (u *User) SetListener(listener func() open_im_sdk_callback.OnUserListener) 
 	u.listener = listener
 }
 
+func (u *User) UserOnlineStatusChange(users map[string][]int32) {
+	for userID, onlinePlatformIDs := range users {
+		status := userPb.OnlineStatus{
+			UserID:      userID,
+			PlatformIDs: onlinePlatformIDs,
+		}
+		if len(status.PlatformIDs) == 0 {
+			status.Status = constant.Offline
+		} else {
+			status.Status = constant.Online
+		}
+		u.listener().OnUserStatusChanged(utils.StructToJsonString(&status))
+	}
+}
+
 // NewUser creates a new User object.
 func NewUser(dataBase db_interface.DataBase, loginUserID string, conversationCh chan common.Cmd2Value) *User {
 	user := &User{DataBase: dataBase, loginUserID: loginUserID, conversationCh: conversationCh}
 	user.initSyncer()
-	user.UserBasicCache = cache.NewCache[string, *BasicInfo]()
-	user.OnlineStatusCache = cache.NewCache[string, *userPb.OnlineStatus]()
+	user.UserBasicCache = cache.NewCache[string, *sdk_struct.BasicInfo]()
+	//user.OnlineStatusCache = cache.NewCache[string, *userPb.OnlineStatus]()
 	return user
 }
 
 func (u *User) initSyncer() {
-	u.userSyncer = syncer.New(
+	u.userSyncer = syncer.New[*model_struct.LocalUser, syncer.NoResp, string](
 		func(ctx context.Context, value *model_struct.LocalUser) error {
 			return u.InsertLoginUser(ctx, value)
 		},
@@ -93,7 +106,7 @@ func (u *User) initSyncer() {
 			return nil
 		},
 	)
-	u.commandSyncer = syncer.New(
+	u.commandSyncer = syncer.New[*model_struct.LocalUserCommand, syncer.NoResp, string](
 		func(ctx context.Context, command *model_struct.LocalUserCommand) error {
 			// Logic to insert a command
 			return u.DataBase.ProcessUserCommandAdd(ctx, command)
@@ -179,7 +192,7 @@ func (u *User) DoNotification(ctx context.Context, msg *sdkws.MsgData) {
 		case constant.UserInfoUpdatedNotification:
 			u.userInfoUpdatedNotification(ctx, msg)
 		case constant.UserStatusChangeNotification:
-			u.userStatusChangeNotification(ctx, msg)
+			//u.userStatusChangeNotification(ctx, msg)
 		case constant.UserCommandAddNotification:
 			u.userCommandAddNotification(ctx, msg)
 		case constant.UserCommandDeleteNotification:
@@ -209,19 +222,19 @@ func (u *User) userInfoUpdatedNotification(ctx context.Context, msg *sdkws.MsgDa
 }
 
 // userStatusChangeNotification get subscriber status change callback
-func (u *User) userStatusChangeNotification(ctx context.Context, msg *sdkws.MsgData) {
-	log.ZDebug(ctx, "userStatusChangeNotification", "msg", *msg)
-	tips := sdkws.UserStatusChangeTips{}
-	if err := utils.UnmarshalNotificationElem(msg.Content, &tips); err != nil {
-		log.ZError(ctx, "comm.UnmarshalTips failed", err, "msg", msg.Content)
-		return
-	}
-	if tips.FromUserID == u.loginUserID {
-		log.ZDebug(ctx, "self terminal login", "tips", tips)
-		return
-	}
-	u.SyncUserStatus(ctx, tips.FromUserID, tips.Status, tips.PlatformID)
-}
+//func (u *User) userStatusChangeNotification(ctx context.Context, msg *sdkws.MsgData) {
+//	log.ZDebug(ctx, "userStatusChangeNotification", "msg", *msg)
+//	tips := sdkws.UserStatusChangeTips{}
+//	if err := utils.UnmarshalNotificationElem(msg.Content, &tips); err != nil {
+//		log.ZError(ctx, "comm.UnmarshalTips failed", err, "msg", msg.Content)
+//		return
+//	}
+//	if tips.FromUserID == u.loginUserID {
+//		log.ZDebug(ctx, "self terminal login", "tips", tips)
+//		return
+//	}
+//	u.SyncUserStatus(ctx, tips.FromUserID, tips.Status, tips.PlatformID)
+//}
 
 // userCommandAddNotification handle notification when user add favorite
 func (u *User) userCommandAddNotification(ctx context.Context, msg *sdkws.MsgData) {
@@ -260,9 +273,9 @@ func (u *User) userCommandUpdateNotification(ctx context.Context, msg *sdkws.Msg
 func (u *User) GetUsersInfoFromSvr(ctx context.Context, userIDs []string) ([]*model_struct.LocalUser, error) {
 	resp, err := util.CallApi[userPb.GetDesignateUsersResp](ctx, constant.GetUsersInfoRouter, userPb.GetDesignateUsersReq{UserIDs: userIDs})
 	if err != nil {
-		return nil, sdkerrs.Warp(err, "GetUsersInfoFromSvr failed")
+		return nil, sdkerrs.WrapMsg(err, "GetUsersInfoFromSvr failed")
 	}
-	return util.Batch(ServerUserToLocalUser, resp.UsersInfo), nil
+	return datautil.Batch(ServerUserToLocalUser, resp.UsersInfo), nil
 }
 
 // GetSingleUserFromSvr retrieves user information from the server.
@@ -274,7 +287,7 @@ func (u *User) GetSingleUserFromSvr(ctx context.Context, userID string) (*model_
 	if len(users) > 0 {
 		return users[0], nil
 	}
-	return nil, sdkerrs.ErrUserIDNotFound.Wrap(fmt.Sprintf("getSelfUserInfo failed, userID: %s not exist", userID))
+	return nil, sdkerrs.ErrUserIDNotFound.WrapMsg(fmt.Sprintf("getSelfUserInfo failed, userID: %s not exist", userID))
 }
 
 // getSelfUserInfo retrieves the user's information.
